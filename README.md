@@ -2,8 +2,6 @@
 
 Autonomous AI research framework. A master agent and researcher agent spiral upward through iterative experiments — each turn learning from the last — until success criteria are met.
 
-Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch) and [lidangzzz/goal-driven](https://github.com/lidangzzz/goal-driven).
-
 ## The Helix Loop
 
 Each turn has 3 steps:
