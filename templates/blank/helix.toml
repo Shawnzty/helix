@@ -1,0 +1,15 @@
+[[agents]]
+name = "master"
+role = "master"
+cli = "claude"
+model = "claude-opus-4.6"
+full_access_flag = "--dangerously-skip-permissions"
+description = "Brainstorms ideas and reflects on results"
+
+[[agents]]
+name = "researcher"
+role = "researcher"
+cli = "codex"
+model = "gpt-5.4"
+full_access_flag = "--dangerously-bypass-approvals-and-sandbox"
+description = "Executes experiments, writes code, runs evaluation"
