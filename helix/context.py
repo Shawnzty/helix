@@ -32,15 +32,20 @@ def build_brainstorm_context(workspace: Path, run_id: str) -> Path:
 
     goal = _read_if_exists(workspace / "goal.md")
     tree = _read_if_exists(workspace / "tree_search.md")
-    reference_note = ""
+
+    # Build optional resources section
+    resources_lines: list[str] = []
     ref_dir = workspace / "reference"
     if ref_dir.is_dir() and any(ref_dir.iterdir()):
         files = [f.name for f in ref_dir.iterdir() if f.is_file()]
-        reference_note = (
-            f"\n\n## Reference Documents\n\n"
-            f"The following reference documents are available in the `reference/` directory: {', '.join(files)}. "
-            f"Read them if they would help inform your brainstorming.\n"
+        resources_lines.append(
+            f"- **Reference documents** are available in the `reference/` directory: "
+            f"{', '.join(files)}. Read any that are relevant to your brainstorming."
         )
+
+    resources_section = ""
+    if resources_lines:
+        resources_section = "\n" + "\n".join(resources_lines) + "\n"
 
     context = f"""# Brainstorm — Run {tree_number}
 
@@ -52,6 +57,15 @@ You are the **master** agent. Read the goal and research tree below. Decide whet
 
 Then write your reasoning and proposed idea to `runs/{run_id}/idea.md`.
 
+## Capabilities
+
+You have full computer access. Use your judgment — if any of these would help, do them:
+- **Web search**: Search the web for papers, documentation, benchmarks, or techniques relevant to the research goal. Do this when you need external knowledge to inform your next idea.
+- **Read reference documents**: If a `reference/` directory exists, read files in it that are relevant.
+- **Read project files**: Explore the codebase, data, or previous run artifacts to understand the current state.
+
+These are optional — only use them when they would genuinely help you make a better decision. Don't search or read every time.
+{resources_section}
 ## Goal
 
 {goal}
@@ -59,7 +73,7 @@ Then write your reasoning and proposed idea to `runs/{run_id}/idea.md`.
 ## Research Tree
 
 {tree}
-{reference_note}
+
 ## Output
 
 Write `runs/{run_id}/idea.md` with:

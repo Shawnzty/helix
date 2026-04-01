@@ -33,6 +33,25 @@ class TestBuildBrainstormContext:
         assert path.parent.name == ".helix"
         assert path.exists()
 
+    def test_mentions_web_search_as_optional(self, tmp_path):
+        ws = _setup_workspace(tmp_path)
+        path = build_brainstorm_context(ws, "2")
+        content = path.read_text()
+        assert "Web search" in content
+        assert "optional" in content.lower()
+
+    def test_lists_reference_files_when_present(self, tmp_path):
+        ws = _setup_workspace(tmp_path)
+        ref_dir = ws / "reference"
+        ref_dir.mkdir()
+        (ref_dir / "paper.pdf").write_text("fake pdf")
+        (ref_dir / "notes.md").write_text("some notes")
+        path = build_brainstorm_context(ws, "2")
+        content = path.read_text()
+        assert "paper.pdf" in content
+        assert "notes.md" in content
+        assert "reference/" in content
+
 
 class TestBuildExecuteContext:
     def test_contains_idea_and_plan_instruction(self, tmp_path):
