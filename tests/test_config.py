@@ -29,7 +29,7 @@ class TestAgentConfig:
 
     def test_prompt_flag_codex(self):
         a = AgentConfig(name="r", role="researcher", cli="codex")
-        assert a.prompt_flag == "-q"
+        assert a.prompt_flag is None  # codex takes prompt as positional arg
 
     def test_prompt_flag_unknown_defaults_to_p(self):
         a = AgentConfig(name="x", role="researcher", cli="custom-cli")

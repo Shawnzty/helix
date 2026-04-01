@@ -2,7 +2,7 @@
 name = "master"
 role = "master"
 cli = "claude"
-model = "claude-opus-4.6"
+model = "claude-opus-4-6"
 full_access_flag = "--dangerously-skip-permissions"
 description = "Brainstorms ideas and reflects on results"
 

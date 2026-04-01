@@ -43,6 +43,7 @@ class HelixLoop:
         self._shutdown_requested = False
         self._original_sigint = None
         self._original_sigterm = None
+        self._failed_run_ids: set[str] = set()  # Track failed runs to avoid infinite retry
 
     def _install_signal_handlers(self) -> None:
         self._original_sigint = signal.getsignal(signal.SIGINT)
@@ -76,14 +77,19 @@ class HelixLoop:
         frontiers = get_frontier_runs(nodes)
 
         if frontiers:
-            # Pick the first frontier node
-            frontier = frontiers[0]
-            run_id = frontier.number.replace(".", "_")
-            logger.info("Picked frontier run: %s", frontier.number)
-            return run_id
+            # Pick the first frontier node that hasn't already failed
+            for frontier in frontiers:
+                run_id = frontier.number.replace(".", "_")
+                if run_id not in self._failed_run_ids:
+                    logger.info("Picked frontier run: %s", frontier.number)
+                    return run_id
 
-        # No frontier nodes — create new top-level run
-        return next_run_id(self.workspace, parent_id=None)
+        # No usable frontier — create a new top-level run
+        # Account for both existing tree nodes and previously failed IDs
+        run_id = next_run_id(self.workspace, parent_id=None)
+        while run_id in self._failed_run_ids:
+            run_id = str(int(run_id) + 1)
+        return run_id
 
     def run(self, max_runs: int = 100) -> None:
         """Run the helix loop."""
@@ -111,11 +117,17 @@ class HelixLoop:
                     result = spawn_agent(master, ctx, log_dir / "brainstorm", timeout=timeout)
                     if result.exit_code != 0:
                         console.print(f"[red]Master brainstorm failed (exit {result.exit_code})[/red]")
+                        if result.stderr:
+                            console.print(f"[dim red]stderr: {result.stderr[:500]}[/dim red]")
+                        if result.stdout:
+                            console.print(f"[dim red]stdout: {result.stdout[:500]}[/dim red]")
                         logger.error("Brainstorm failed for run %s: exit %d", run_id, result.exit_code)
+                        self._failed_run_ids.add(run_id)
                         continue
                 except Exception:
                     logger.exception("Brainstorm crashed for run %s", run_id)
                     console.print("[red]Master brainstorm crashed — skipping run[/red]")
+                    self._failed_run_ids.add(run_id)
                     continue
 
                 if self._shutdown_requested or self._check_stop_file():
@@ -128,6 +140,10 @@ class HelixLoop:
                     result = spawn_agent(researcher, ctx, log_dir / "execute", timeout=timeout)
                     if result.exit_code != 0:
                         console.print(f"[red]Researcher execute failed (exit {result.exit_code})[/red]")
+                        if result.stderr:
+                            console.print(f"[dim red]stderr: {result.stderr[:500]}[/dim red]")
+                        if result.stdout:
+                            console.print(f"[dim red]stdout: {result.stdout[:500]}[/dim red]")
                         logger.error("Execute failed for run %s: exit %d", run_id, result.exit_code)
                         # Still try to reflect on partial results
 
@@ -149,10 +165,28 @@ class HelixLoop:
                     result = spawn_agent(master, ctx, log_dir / "reflect", timeout=timeout)
                     if result.exit_code != 0:
                         console.print(f"[red]Master reflect failed (exit {result.exit_code})[/red]")
+                        if result.stderr:
+                            console.print(f"[dim red]stderr: {result.stderr[:500]}[/dim red]")
+                        if result.stdout:
+                            console.print(f"[dim red]stdout: {result.stdout[:500]}[/dim red]")
                         logger.error("Reflect failed for run %s: exit %d", run_id, result.exit_code)
                 except Exception:
                     logger.exception("Reflect crashed for run %s", run_id)
                     console.print("[red]Master reflect crashed[/red]")
+
+                # --- Post-run validation ---
+                # Check if critical files were actually produced
+                results_path = self.workspace / "runs" / run_id / "results.md"
+                if not results_path.exists():
+                    console.print(f"[yellow]Warning: results.md missing for run {tree_number} — marking as incomplete[/yellow]")
+                    self._failed_run_ids.add(run_id)
+
+                # Check if tree_search.md was actually updated for this run
+                nodes_after = parse_tree_search(self.workspace)
+                this_node = next((n for n in nodes_after if n.number == tree_number), None)
+                if this_node and this_node.result in ("(pending)", ""):
+                    console.print(f"[yellow]Warning: tree_search.md not updated for run {tree_number} — marking as incomplete[/yellow]")
+                    self._failed_run_ids.add(run_id)
 
                 # Regenerate CLAUDE.md / AGENTS.md
                 generate_agent_md(self.workspace)
@@ -161,4 +195,7 @@ class HelixLoop:
         finally:
             self._restore_signal_handlers()
 
-        console.print("[bold green]Helix loop finished.[/bold green]")
+        # Summary
+        total = run_count if 'run_count' in dir() else 0
+        failed = len(self._failed_run_ids)
+        console.print(f"[bold green]Helix loop finished.[/bold green] Runs attempted: {total}, incomplete: {failed}")

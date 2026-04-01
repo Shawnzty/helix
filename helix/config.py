@@ -34,10 +34,11 @@ DEFAULTS: dict[str, Any] = {
     "agent_timeout_seconds": 3600,
 }
 
-# Map cli name → prompt flag used to pass the prompt string
-PROMPT_FLAGS: dict[str, str] = {
+# Map cli name → prompt flag used to pass the prompt string.
+# None means the prompt is a positional argument (no flag needed).
+PROMPT_FLAGS: dict[str, str | None] = {
     "claude": "-p",
-    "codex": "-q",
+    "codex": None,  # codex takes prompt as positional argument
 }
 
 
@@ -56,7 +57,8 @@ class AgentConfig(BaseModel):
     reasoning_level: str | None = None
 
     @property
-    def prompt_flag(self) -> str:
+    def prompt_flag(self) -> str | None:
+        """Return the flag for passing the prompt, or None if positional."""
         return PROMPT_FLAGS.get(self.cli, "-p")
 
 

@@ -38,10 +38,11 @@ class TestBuildCommand:
         ctx.write_text("test context")
         cmd = build_command(_researcher_agent(), ctx)
         assert cmd[0] == "codex"
+        assert cmd[1] == "exec"  # non-interactive subcommand
         assert "--dangerously-bypass-approvals-and-sandbox" in cmd
-        assert "-q" in cmd
-        assert "--reasoning" in cmd
-        assert "high" in cmd
+        # codex takes prompt as positional arg (no flag)
+        assert "-q" not in cmd
+        assert cmd[-1] == "test context"
 
 
 class TestSpawnAgent:

@@ -20,6 +20,10 @@ def build_command(agent: AgentConfig, context_path: Path) -> list[str]:
 
     cmd: list[str] = [agent.cli]
 
+    # Codex requires "exec" subcommand for non-interactive (piped) usage
+    if agent.cli == "codex":
+        cmd.append("exec")
+
     # Full access flag
     if agent.full_access_flag:
         cmd.append(agent.full_access_flag)
@@ -30,12 +34,11 @@ def build_command(agent: AgentConfig, context_path: Path) -> list[str]:
     elif agent.cli == "codex" and agent.model:
         cmd.extend(["--model", agent.model])
 
-    # Reasoning level for codex
-    if agent.cli == "codex" and agent.reasoning_level:
-        cmd.extend(["--reasoning", agent.reasoning_level])
-
-    # Prompt flag + content
-    cmd.extend([agent.prompt_flag, context_content])
+    # Prompt: either behind a flag (-p for claude) or as positional arg (codex exec)
+    if agent.prompt_flag:
+        cmd.extend([agent.prompt_flag, context_content])
+    else:
+        cmd.append(context_content)
 
     return cmd
 

@@ -94,3 +94,65 @@ class TestHelixLoop:
 
         # First run crashed at brainstorm, second run should have completed
         assert call_count >= 2
+
+    @patch("helix.loop.spawn_agent")
+    @patch("helix.loop.generate_agent_md")
+    def test_missing_results_marks_failed(self, mock_gen, mock_spawn, tmp_path):
+        """When results.md is never written, the run should be marked as incomplete."""
+        ws = _setup_workspace(tmp_path)
+        global_cfg, workspace_cfg = _configs()
+
+        def side_effect(agent, ctx, log_dir, timeout=3600):
+            run_dir = ws / "runs" / "1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            if agent.role == "master" and "brainstorm" in str(ctx):
+                (run_dir / "idea.md").write_text("# Idea\nTry X")
+            elif agent.role == "researcher":
+                # Researcher does NOT write results.md
+                pass
+            elif agent.role == "master" and "reflect" in str(ctx):
+                (run_dir / "reflect.md").write_text("# Reflect\nNo results")
+            return AgentRun(stdout="ok", stderr="", exit_code=0, duration_seconds=1.0)
+
+        mock_spawn.side_effect = side_effect
+
+        loop = HelixLoop(ws, global_cfg, workspace_cfg)
+        loop.run(max_runs=2)
+
+        # Run 1 should be tracked as failed due to missing results.md
+        assert "1" in loop._failed_run_ids
+
+    @patch("helix.loop.spawn_agent")
+    @patch("helix.loop.generate_agent_md")
+    def test_pending_tree_node_marks_failed(self, mock_gen, mock_spawn, tmp_path):
+        """When tree_search.md still shows (pending) after reflect, mark as incomplete."""
+        ws = _setup_workspace(tmp_path)
+        # Pre-populate tree with a frontier node
+        (ws / "tree_search.md").write_text(
+            "# Research Tree\n\n"
+            "1. [frontier] Test idea\n"
+            "   idea: (pending)\n"
+            "   result: (pending)\n"
+            "   reflect: (pending)\n"
+        )
+        global_cfg, workspace_cfg = _configs()
+
+        def side_effect(agent, ctx, log_dir, timeout=3600):
+            run_dir = ws / "runs" / "1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            if agent.role == "master" and "brainstorm" in str(ctx):
+                (run_dir / "idea.md").write_text("# Idea\nTry X")
+            elif agent.role == "researcher":
+                (run_dir / "results.md").write_text("# Results\nDone")
+            elif agent.role == "master" and "reflect" in str(ctx):
+                # Reflect agent does NOT update tree_search.md — node stays (pending)
+                (run_dir / "reflect.md").write_text("# Reflect\nOk")
+            return AgentRun(stdout="ok", stderr="", exit_code=0, duration_seconds=1.0)
+
+        mock_spawn.side_effect = side_effect
+
+        loop = HelixLoop(ws, global_cfg, workspace_cfg)
+        loop.run(max_runs=2)
+
+        # Run 1 should be marked failed because tree_search.md still shows (pending)
+        assert "1" in loop._failed_run_ids

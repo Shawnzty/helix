@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(uv run:*)"
+      "Bash(uv run:*)",
+      "Bash(claude --dangerously-skip-permissions --model claude-opus-4.6 -p \"say hello\")",
+      "Bash(claude --dangerously-skip-permissions -p \"say hello\")",
+      "Bash(codex --dangerously-bypass-approvals-and-sandbox -q \"say hello\")",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(codex --help)",
+      "Bash(uv tool:*)",
+      "Bash(codex exec:*)"
     ]
   }
 }

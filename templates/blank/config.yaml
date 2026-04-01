@@ -4,7 +4,7 @@ anthropic_api_key: ""
 defaults:
   setup_model: "gpt-5.4"
   master_cli: "claude"
-  master_model: "claude-opus-4.6"
+  master_model: "claude-opus-4-6"
   researcher_cli: "codex"
   researcher_model: "gpt-5.4"
   claude_full_access_flag: "--dangerously-skip-permissions"
