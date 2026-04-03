@@ -14,6 +14,7 @@ from rich.table import Table
 from helix.config import (
     AgentConfig,
     GlobalConfig,
+    build_default_global_config_data,
     load_global_config,
     load_workspace_config,
     resolve_config,
@@ -21,6 +22,9 @@ from helix.config import (
 )
 from helix.loop import HelixLoop
 from helix.runs import get_best_run, get_frontier_runs, parse_tree_search
+from helix.setup import SetupCancelled, SetupError, run_setup_flow
+from helix.setup_ui import ConsoleSetupUI, SetupMode
+from helix.success import SuccessCriteriaError
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -32,11 +36,35 @@ app.add_typer(config_app, name="config")
 app.add_typer(agents_app, name="agents")
 
 PathOption = Annotated[Path, typer.Option("--path", help="Workspace path.")]
+SetupModeOption = Annotated[
+    Optional[str],
+    typer.Option("--mode", help="Setup mode: conversational or local."),
+]
 
 
 # ---------------------------------------------------------------------------
-# helix run / status / history / stop
+# helix init / setup / run / status / history / stop
 # ---------------------------------------------------------------------------
+
+
+@app.command()
+def init(
+    path: PathOption = Path("."),
+    mode: SetupModeOption = None,
+    setup_model: Annotated[Optional[str], typer.Option("--setup-model", help="Setup LLM model.")] = None,
+) -> None:
+    """Initialize a Helix workspace."""
+    _run_setup_command(path=path, mode=mode, setup_model=setup_model)
+
+
+@app.command()
+def setup(
+    path: PathOption = Path("."),
+    mode: SetupModeOption = None,
+    setup_model: Annotated[Optional[str], typer.Option("--setup-model", help="Setup LLM model.")] = None,
+) -> None:
+    """Re-run setup for an existing Helix workspace."""
+    _run_setup_command(path=path, mode=mode, setup_model=setup_model)
 
 
 @app.command()
@@ -54,7 +82,11 @@ def run(
         raise typer.Exit(1)
 
     loop = HelixLoop(workspace, global_cfg, workspace_cfg)
-    loop.run(max_runs=max_runs)
+    try:
+        loop.run(max_runs=max_runs)
+    except (FileNotFoundError, SuccessCriteriaError) as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -131,6 +163,38 @@ def stop(path: PathOption = Path(".")) -> None:
     console.print("[yellow]Stop signal written. The loop will stop after the current step.[/yellow]")
 
 
+def _run_setup_command(
+    *,
+    path: Path,
+    mode: str | None,
+    setup_model: str | None,
+) -> None:
+    workspace = path.resolve()
+    ui = ConsoleSetupUI(console)
+    normalized_mode: SetupMode | None = None
+
+    if mode is not None:
+        lowered = mode.strip().lower()
+        if lowered not in {"conversational", "local"}:
+            console.print("[red]--mode must be 'conversational' or 'local'.[/red]")
+            raise typer.Exit(1)
+        normalized_mode = lowered  # type: ignore[assignment]
+
+    try:
+        run_setup_flow(
+            workspace,
+            ui,
+            mode=normalized_mode,
+            setup_model=setup_model,
+        )
+    except SetupCancelled as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(1)
+    except SetupError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+
 # ---------------------------------------------------------------------------
 # helix config
 # ---------------------------------------------------------------------------
@@ -145,21 +209,7 @@ def config_init(path: PathOption = Path(".")) -> None:
         console.print("[yellow]config.yaml already exists.[/yellow]")
         return
 
-    default = {
-        "openai_api_key": "",
-        "anthropic_api_key": "",
-        "defaults": {
-            "setup_model": "gpt-5.4",
-            "master_cli": "claude",
-            "master_model": "claude-opus-4.6",
-            "researcher_cli": "codex",
-            "researcher_model": "gpt-5.4",
-            "claude_full_access_flag": "--dangerously-skip-permissions",
-            "codex_full_access_flag": "--dangerously-bypass-approvals-and-sandbox",
-            "codex_reasoning_level": "high",
-            "agent_timeout_seconds": 3600,
-        },
-    }
+    default = build_default_global_config_data()
     with config_path.open("w") as f:
         yaml.dump(default, f, default_flow_style=False, sort_keys=False)
     console.print(f"[green]Created {config_path}[/green]")
@@ -244,7 +294,7 @@ def agents_add(
     name: Annotated[str, typer.Option("--name")],
     role: Annotated[str, typer.Option("--role")],
     cli: Annotated[str, typer.Option("--cli")] = "claude",
-    model: Annotated[str, typer.Option("--model")] = "claude-opus-4.6",
+    model: Annotated[str, typer.Option("--model")] = "claude-opus-4-6",
     full_access_flag: Annotated[str, typer.Option("--full-access-flag")] = "--dangerously-skip-permissions",
     description: Annotated[str, typer.Option("--description")] = "",
     path: PathOption = Path("."),

@@ -4,7 +4,12 @@ from helix.runs import (
     create_run_folder,
     get_best_run,
     get_frontier_runs,
+    get_node_by_number,
+    increment_run_id,
+    is_dead_end,
+    next_child_run_id,
     next_run_id,
+    next_top_level_run_id,
     parse_results,
     parse_tree_search,
 )
@@ -151,6 +156,22 @@ class TestGetFrontierRuns:
         assert frontiers[0].number == "3"
 
 
+class TestTreeHelpers:
+    def test_get_node_by_number(self, tmp_path):
+        (tmp_path / "tree_search.md").write_text(SAMPLE_TREE)
+        nodes = parse_tree_search(tmp_path)
+        node = get_node_by_number(nodes, "2.1.2")
+        assert node is not None
+        assert node.title == "Muon + cosine + linear decay"
+
+    def test_is_dead_end(self, tmp_path):
+        (tmp_path / "tree_search.md").write_text(SAMPLE_TREE)
+        nodes = parse_tree_search(tmp_path)
+        node = get_node_by_number(nodes, "1")
+        assert node is not None
+        assert is_dead_end(node) is True
+
+
 class TestNextRunId:
     def test_first_run(self, tmp_path):
         (tmp_path / "tree_search.md").write_text("# Research Tree\n\n")
@@ -159,13 +180,19 @@ class TestNextRunId:
     def test_next_top_level(self, tmp_path):
         (tmp_path / "tree_search.md").write_text(SAMPLE_TREE)
         assert next_run_id(tmp_path) == "4"
+        assert next_top_level_run_id(tmp_path) == "4"
 
     def test_next_child(self, tmp_path):
         (tmp_path / "tree_search.md").write_text(SAMPLE_TREE)
         # 2.1 has children 2.1.1 and 2.1.2, so next is 2.1.3
         assert next_run_id(tmp_path, parent_id="2_1") == "2_1_3"
+        assert next_child_run_id(tmp_path, "2.1") == "2_1_3"
 
     def test_first_child(self, tmp_path):
         (tmp_path / "tree_search.md").write_text(SAMPLE_TREE)
         # Node 1 has no children, so first child is 1.1
         assert next_run_id(tmp_path, parent_id="1") == "1_1"
+
+    def test_increment_run_id(self):
+        assert increment_run_id("3") == "4"
+        assert increment_run_id("2_1_3") == "2_1_4"

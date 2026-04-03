@@ -5,9 +5,10 @@ defaults:
   setup_model: "gpt-5.4"
   master_cli: "claude"
   master_model: "claude-opus-4-6"
+  master_thinking_level: "none"
   researcher_cli: "codex"
   researcher_model: "gpt-5.4"
+  researcher_thinking_level: "none"
   claude_full_access_flag: "--dangerously-skip-permissions"
   codex_full_access_flag: "--dangerously-bypass-approvals-and-sandbox"
-  codex_reasoning_level: "high"
   agent_timeout_seconds: 3600

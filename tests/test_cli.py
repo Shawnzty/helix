@@ -15,7 +15,7 @@ def _setup_workspace(tmp_path):
 name = "master"
 role = "master"
 cli = "claude"
-model = "claude-opus-4.6"
+model = "claude-opus-4-6"
 full_access_flag = "--dangerously-skip-permissions"
 description = "Master"
 
@@ -78,6 +78,55 @@ class TestStop:
         result = runner.invoke(app, ["stop", "--path", str(tmp_path)])
         assert result.exit_code == 0
         assert (tmp_path / ".helix" / "stop").exists()
+
+
+class TestInit:
+    def test_init_without_mode_uses_picker_and_scaffolds(self, tmp_path):
+        result = runner.invoke(
+            app,
+            ["init", "--path", str(tmp_path)],
+            input="2\ny\n1\n1\n1\n1\nn\nn\ny\n",
+        )
+        assert result.exit_code == 0
+        assert "Choose setup mode" in result.output
+        assert (tmp_path / "goal.md").exists()
+        assert (tmp_path / "master_agent.md").exists()
+        assert (tmp_path / "researcher_agent.md").exists()
+        assert (tmp_path / "helix.toml").exists()
+        assert (tmp_path / "tree_search.md").exists()
+
+    def test_init_local_validates_existing_workspace(self, tmp_path):
+        (tmp_path / "goal.md").write_text(
+            "# Goal\n\n## Success Criteria\n\n```yaml\nall:\n  - metric: val_bpb\n    op: \"<\"\n    value: 1.05\n```\n\n"
+            "## Boundary\n\nOnly edit train.py.\n\n## Evaluation\n\nRun evaluate.sh.\n\n## Limitation\n\nSingle GPU.\n"
+        )
+        (tmp_path / "master_agent.md").write_text("# Master\n")
+        (tmp_path / "researcher_agent.md").write_text("# Researcher\n")
+        (tmp_path / "tree_search.md").write_text("# Research Tree\n\n")
+        (tmp_path / "helix.toml").write_text(
+            "[[agents]]\nname = \"master\"\nrole = \"master\"\ncli = \"claude\"\nmodel = \"claude-opus-4-6\"\nfull_access_flag = \"--dangerously-skip-permissions\"\ndescription = \"Master\"\n\n"
+            "[[agents]]\nname = \"researcher\"\nrole = \"researcher\"\ncli = \"codex\"\nmodel = \"gpt-5.4\"\nfull_access_flag = \"--dangerously-bypass-approvals-and-sandbox\"\ndescription = \"Researcher\"\n"
+        )
+
+        result = runner.invoke(
+            app,
+            ["init", "--path", str(tmp_path), "--mode", "local"],
+            input="n\nn\n",
+        )
+        assert result.exit_code == 0
+        assert "Workspace initialized" in result.output
+
+
+class TestSetupCommand:
+    def test_setup_reuses_local_flow(self, tmp_path):
+        result = runner.invoke(
+            app,
+            ["setup", "--path", str(tmp_path), "--mode", "local"],
+            input="y\n1\n1\n1\n1\nn\nn\ny\n",
+        )
+        assert result.exit_code == 0
+        assert (tmp_path / "goal.md").exists()
+        assert (tmp_path / "tree_search.md").exists()
 
 
 class TestConfigInit:

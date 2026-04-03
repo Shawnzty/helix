@@ -5,7 +5,16 @@
 ## Success Criteria
 
 <!-- Machine-checkable conditions for success -->
-<!-- Example: val_bpb < 1.05 -->
+<!-- Provide a fenced YAML block. Helix evaluates these rules against the JSON metrics in results.md. -->
+```yaml
+all:
+  - metric: val_bpb
+    op: "<"
+    value: 1.05
+  - metric: train_time_seconds
+    op: "<="
+    value: 300
+```
 
 ## Boundary
 

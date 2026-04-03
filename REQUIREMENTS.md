@@ -12,11 +12,11 @@ Each turn has 3 steps:
 
 ```
  Step 1: BRAINSTORM (Master)
- Read goal.md + tree_search.md → web search or read reference documents if necessary → decide branch → write idea.md
+ Read goal.md + tree_search.md → web search or read reference documents if necessary → choose next branch → stage selection
                     │
                     ▼
  Step 2: EXECUTE (Researcher)
- Write plan first → implement idea → run evaluation → write results.md
+ Write plan first → rebuild context from plan → implement → write results.md
                     │
                     ▼
  Step 3: REFLECT (Master)
@@ -25,15 +25,31 @@ Each turn has 3 steps:
 
 ### Step 1 — Brainstorm (Master)
 
-Master reads `goal.md`+`tree_search.md`, and if necessary searches the web or reads reference documents. Decides whether to deepen an existing branch or start a new top-level direction. Writes `runs/{run_id}/idea.md` with reasoning and logic.
+Master reads `goal.md` + `tree_search.md`, and if necessary searches the web or reads reference documents. It reasons over the entire tree, decides whether to deepen an existing non-dead-end branch or start a new top-level direction, and writes a staged brainstorm file to `.helix/brainstorm_selection.md`.
+
+That staged file must begin with machine-readable YAML front matter describing the branch choice:
+
+```yaml
+---
+mode: child
+parent: "2.1"
+title: "Try the warmup variant"
+rationale: "Best next move based on the current tree"
+---
+```
+
+Helix validates the selection, assigns the final `run_id`, and then materializes the staged brainstorm into `runs/{run_id}/idea.md`.
 
 ### Step 2 — Execute (Researcher)
 
-**Plan first (mandatory)**: Researcher writes `runs/{run_id}/plan.md` before doing anything — exact files to create or modify, commands to run, order of operations, expected outputs.
+Execute is split into two researcher invocations:
 
-Then executes: writes code, downloads resources, fine-tunes hyperparameters, runs evaluation. All generated artifacts go into `runs/{run_id}/` (codes/, data/, logs/, etc.).
+1. **Plan step** — Helix inlines `researcher_agent.md` + `goal.md` + `idea.md`. The researcher writes `runs/{run_id}/plan.md` with exact files to create or modify, commands to run, order of operations, expected outputs, and checkpoints.
+2. **Run step** — Helix rebuilds the context and inlines `researcher_agent.md` + `plan.md`. The researcher executes the plan, writes code, runs evaluation, and produces `results.md`.
 
 Writes `runs/{run_id}/results.md` with: what was done, metrics (JSON), observations.
+
+Helix checks success by reading a fenced YAML block under `## Success Criteria` in `goal.md` and comparing it against the top-level JSON metrics in `results.md`. If the criteria pass, Helix still runs Reflect for that run and then stops before the next run.
 
 **1-hour timeout**: If any single program execution exceeds 1 hour, the framework kills it. The researcher's context instructs: "If a program would take longer than 1 hour, break it into smaller steps or find a faster approach. Check intermediate results and report partial progress."
 
@@ -98,7 +114,7 @@ The core knowledge structure. A tree of all runs — each node is one experiment
 | `[★ best]` | Current best result across all branches |
 | `[active]` | Has children, part of a productive branch |
 | `[dead-end]` | Tried, didn't help, don't revisit |
-| `[frontier]` | Leaf node worth exploring next |
+| `[frontier]` | Promising leaf the master may choose to explore next |
 
 ### Numbering
 
@@ -116,6 +132,13 @@ The number encodes lineage: `2.1.1` is a child of `2.1`, which is a child of `2`
 
 ## 3. Setup
 
+`helix init` supports two setup modes:
+- **Conversational** — draft the workspace from a paragraph with a setup LLM
+- **Local files** — validate files already present in the project folder and scaffold only the missing or invalid ones
+
+Helix treats these 5 files as the initialization contract: `goal.md`, `master_agent.md`, `researcher_agent.md`, `helix.toml`, and `tree_search.md`.
+Whenever setup creates or replaces `helix.toml`, it should ask separately for the master and researcher model IDs and provider-aware `thinking_level` values.
+
 ### 3.1 Paragraph-First
 
 User describes their task in free-form text. The setup LLM (GPT-5.4 by default) auto-extracts all fields. Only asks follow-up questions for genuinely missing info (max 2–3 questions).
@@ -129,11 +152,19 @@ Describe your research task:
 
 → GPT-5.4 extracts goal (the objective), criteria (machine-checkable success conditions), boundary (what agents can/cannot modify), evaluation (how to measure results), limitation (hardware/time/resource constraints).
 → Asks 1-2 follow-ups if anything is ambiguous
-→ Generates research_memory/ files + helix.toml
+→ Generates `goal.md`, `master_agent.md`, `researcher_agent.md`, `tree_search.md`, and `helix.toml`
 → User reviews and approves
 ```
 
-### 3.2 Research Memory Files
+### 3.2 Local Files Mode
+
+If the user already has workspace files, `helix init --mode local` or `helix setup --mode local` should:
+- detect which core files are valid, missing, or invalid
+- report the audit result in the terminal
+- offer to scaffold only missing files from starter templates
+- offer to repair invalid files after confirmation, preserving a `.bak` copy before replacement
+
+### 3.3 Research Memory Files
 
 | File | Source | Purpose |
 |------|--------|---------|
@@ -141,7 +172,19 @@ Describe your research task:
 | `tree_search.md` | Master (evolving) | Tree of all runs with summaries |
 | `setup_transcript.md` | Setup (static) | Full setup conversation |
 
-### 3.3 Config
+`goal.md` success criteria must be machine-checkable. The `## Success Criteria` section should contain a fenced YAML block like:
+
+```yaml
+all:
+  - metric: val_bpb
+    op: "<"
+    value: 1.05
+  - metric: train_time_seconds
+    op: "<="
+    value: 300
+```
+
+### 3.4 Config
 
 ```yaml
 openai_api_key: "sk-..."
@@ -150,12 +193,13 @@ anthropic_api_key: "sk-ant-..."
 defaults:
   setup_model: "gpt-5.4"
   master_cli: "claude"
-  master_model: "claude-opus-4.6"
+  master_model: "claude-opus-4-6"
+  master_thinking_level: "none"
   researcher_cli: "codex"
   researcher_model: "gpt-5.4"
+  researcher_thinking_level: "none"
   claude_full_access_flag: "--dangerously-skip-permissions"
   codex_full_access_flag: "--dangerously-bypass-approvals-and-sandbox"
-  codex_reasoning_level: "high"  # none | low | medium | high
   agent_timeout_seconds: 3600
 ```
 
@@ -169,7 +213,7 @@ Resolution order: CLI flags → `helix.toml` → `config.yaml` → built-in defa
 
 | Role | CLI | Model | Steps |
 |------|-----|-------|-------|
-| **Master** | Claude Code | claude-opus-4.6 | 1 (Brainstorm) + 3 (Reflect) |
+| **Master** | Claude Code | claude-opus-4-6 | 1 (Brainstorm) + 3 (Reflect) |
 | **Researcher** | Codex CLI | gpt-5.4 | 2 (Execute) |
 
 **All agents run with full computer permissions.** They can read/write files, run commands, access the network, install packages. No permission prompts.
@@ -194,9 +238,10 @@ helix agents add --name explorer --role researcher \
 name = "master"
 role = "master"
 cli = "claude"
-model = "claude-opus-4.6"
+model = "claude-opus-4-6"
 full_access_flag = "--dangerously-skip-permissions"
 description = "Brainstorms ideas and reflects on results"
+thinking_level = "high"
 
 [[agents]]
 name = "researcher"
@@ -205,27 +250,32 @@ cli = "codex"
 model = "gpt-5.4"
 full_access_flag = "--dangerously-bypass-approvals-and-sandbox"
 description = "Executes experiments, writes code, runs evaluation"
+thinking_level = "none"
 ```
 
 ### 4.4 Agent Invocation
 
 ```bash
 # Claude Code
-claude --dangerously-skip-permissions -p "$(cat .helix/context_{step}.md)"
+claude --dangerously-skip-permissions --model claude-opus-4-6 --effort high -p < .helix/context_brainstorm.md
 
 # Codex CLI
-codex --dangerously-bypass-approvals-and-sandbox -q "$(cat .helix/context_{step}.md)"
+codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-5.4 -c model_reasoning_effort="xhigh" - < .helix/context_execute_run.md
 ```
+
+Helix stores raw CLI model IDs in config. `thinking_level` is a Helix field, but providers use different underlying words: Claude maps it to `--effort` and uses `low`, `medium`, `high`, or `max` (`max` is for Opus 4.6 only), while Codex maps it to `-c model_reasoning_effort=...` and uses `low`, `medium`, `high`, or `xhigh`. `none` is a Helix-level sentinel meaning “omit any explicit override.”
 
 ### 4.5 Plan-First
 
-**Mandatory for Step 2 (Execute) only.** The researcher must write `runs/{run_id}/plan.md` before making any changes. This makes execution transparent and debuggable.
+**Mandatory for Step 2 (Execute) only.** The researcher must write `runs/{run_id}/plan.md` in the first Execute invocation before Helix starts the second Execute invocation. This makes execution transparent and lets Helix narrow the run-time context to the concrete plan.
 
 ---
 
 ## 5. Runs Folder
 
 Every run gets its own folder. The run_id matches the tree numbering (dots replaced with underscores for filesystem compatibility).
+
+Before a run folder exists, Brainstorm writes its staged selection to `.helix/brainstorm_selection.md`. Helix only creates `runs/{run_id}/` after validating that staged selection and assigning the final number from the chosen parent or top-level slot.
 
 ```
 runs/
@@ -262,11 +312,12 @@ The `runs/` folder is the detailed archive. `tree_search.md` is the summary view
 
 | Context File | Agent | Contains | Plan Required? |
 |-------------|-------|----------|---------------|
-| `context_brainstorm.md` | Master | `goal.md` + `tree_search.md` + web search or read reference documents if necessary. Instruction: pick a branch (deepen or new), write `runs/{id}/idea.md`. | No |
-| `context_execute.md` | Researcher | `idea.md` + research memory (goal, criteria, boundary, evaluation, limitation). Instruction: **write plan.md first**, then implement, run eval, write `results.md`. 1-hour per-program timeout. | **Yes** |
-| `context_reflect.md` | Master | `results.md` + `idea.md` + `tree_search.md`. Instruction: write `reflect.md`, update `tree_search.md`. | No |
+| `context_brainstorm.md` | Master | `master_agent.md` + `goal.md` + `tree_search.md` + web search or read reference documents if necessary. Instruction: reason over the full tree, write `.helix/brainstorm_selection.md` with YAML front matter plus the idea writeup. | No |
+| `context_execute_plan.md` | Researcher | `researcher_agent.md` + `goal.md` + `idea.md`. Instruction: write `plan.md` only, do not implement yet. | No |
+| `context_execute_run.md` | Researcher | `researcher_agent.md` + `plan.md`. Instruction: execute the plan, write `results.md`, read other files on demand if needed. | **Yes** |
+| `context_reflect.md` | Master | `master_agent.md` + `goal.md` + `idea.md` + `plan.md` + `results.md` + success summary + `tree_search.md`. Instruction: write `reflect.md`, update `tree_search.md`. | No |
 
-`CLAUDE.md` and `AGENTS.md` are auto-generated at workspace root by concatenating all research memory files.
+`master_agent.md` and `researcher_agent.md` are human-authored workspace files. Helix reads them into the corresponding contexts and never overwrites them.
 
 ---
 
@@ -277,6 +328,8 @@ my-project/
 ├── helix.toml
 ├── evaluate.sh
 ├── goal.md                     # Static
+├── master_agent.md             # Static, human-authored instructions for master steps
+├── researcher_agent.md         # Static, human-authored instructions for researcher steps
 ├── setup_transcript.md         # Static
 ├── tree_search.md              # Evolving (master-written)
 │ 
@@ -294,10 +347,10 @@ my-project/
 │   └── ...
 ├── .helix/
 │   ├── context_brainstorm.md       # Debug: last context
-│   ├── context_execute.md
+│   ├── brainstorm_selection.md     # Staged brainstorm output before run assignment
+│   ├── context_execute_plan.md
+│   ├── context_execute_run.md
 │   └── context_reflect.md
-├── CLAUDE.md                       # Auto-generated
-├── AGENTS.md                       # Auto-generated
 ├── reference/                 # Optional reference documents for agents to read
 │   ├── reference1.pdf
 │   └── ...
@@ -313,8 +366,8 @@ helix config init                   # Create ~/.helix/config.yaml
 helix config show                   # Display config (keys masked)
 helix config set KEY VALUE
 
-helix init [--path .] [--setup-model gpt-5.4]
-helix setup [--path .]              # Re-run setup
+helix init [--path .] [--mode conversational|local] [--setup-model gpt-5.4]
+helix setup [--path .] [--mode conversational|local] [--setup-model gpt-5.4]
 
 helix run [--path .]
 helix status [--path .]
@@ -348,43 +401,51 @@ Build and test in this order:
  
 1. **`helix/config.py`** — Parse `config.yaml` (PyYAML + Pydantic) and `helix.toml` (tomli + Pydantic). Models: `GlobalConfig`, `WorkspaceConfig`, `AgentConfig`. Validation: exactly one master, ≥1 researcher. Config resolution: CLI → toml → yaml → defaults.
  
-2. **`helix/models.py`** — Pydantic models: `RunState` (id, status, parent_id, tree_number), `AgentRun` (stdout, stderr, exit_code, duration), `ParsedResults` (metrics dict, observations).
+2. **`helix/models.py`** — Pydantic models: `RunState` (id, status, parent_id, tree_number), `AgentRun` (stdout, stderr, exit_code, duration), `ParsedResults` (metrics dict, observations), success-check models, and master branch-selection models.
  
-3. **`helix/agents.py`** — Spawn agent CLI as subprocess with full permissions. Build command string from agent config (cli + full_access_flag + prompt flag + context). Capture stdout/stderr to `runs/{id}/logs/`. Enforce timeout (SIGTERM → SIGKILL after 10s). Return `AgentRun`. Handle both Claude (`-p`) and Codex (`-q`) prompt flags.
+3. **`helix/agents.py`** — Spawn agent CLI as subprocess with full permissions. Keep `.helix/context_*.md` as the canonical prompt artifacts, but use stdin-first prompt delivery for supported CLIs and argv fallback for unknown ones. Capture stdout/stderr to `runs/{id}/logs/`. Enforce timeout (SIGTERM → SIGKILL after 10s). Return `AgentRun`.
  
-4. **`helix/context.py`** — Build 3 context markdown files by reading and concatenating research memory files + run-specific files. Write to `.helix/context_{step}.md`. Also: `generate_agent_md()` to concatenate research memory into `CLAUDE.md` / `AGENTS.md`.
+4. **`helix/context.py`** — Build Brainstorm, Execute Plan, Execute Run, and Reflect context markdown files by reading and concatenating role-specific human instruction files, research memory files, and run-specific files. Write them to `.helix/context_*.md`.
  
-5. **`helix/runs.py`** — Run folder management: `create_run_folder(run_id)` (creates `runs/{id}/` with subdirs), `parse_results(run_id)` (read `results.md`, extract JSON metrics block), `parse_tree_search()` (read `tree_search.md`, return list of nodes with status/numbering), `get_best_run()`, `get_frontier_runs()`, `next_run_id(parent)` (compute next child number).
+5. **`helix/runs.py`** — Run folder management: `create_run_folder(run_id)` (creates `runs/{id}/` with subdirs), `parse_results(run_id)` (read `results.md`, extract JSON metrics block), `parse_tree_search()` (read `tree_search.md`, return list of nodes with status/numbering), `get_best_run()`, `get_frontier_runs()`, and parent-oriented numbering helpers.
  
 6. **`helix/loop.py`** — The helix:
    ```
    while not criteria_met and run_count < max_runs:
-       run_id = determine from tree (frontier pick or new)
-       create_run_folder(run_id)
- 
+       parse success criteria from goal.md
+
        # Step 1: Brainstorm
        build context_brainstorm.md
-       spawn master → web search or read reference documents if necessary → writes runs/{id}/idea.md
- 
+       spawn master → web search or read reference documents if necessary → writes .helix/brainstorm_selection.md
+       validate YAML branch choice against tree_search.md
+       assign run_id from the chosen parent or top-level slot
+       create_run_folder(run_id)
+       materialize runs/{id}/idea.md from staged brainstorm output
+
        # Step 2: Execute
-       build context_execute.md
-       spawn researcher → writes plan.md, implements, writes results.md
+       build context_execute_plan.md
+       spawn researcher → writes plan.md only
+       if plan.md exists and plan step exited cleanly:
+           build context_execute_run.md
+           spawn researcher → implements, writes results.md
+       else:
+           skip Execute Run and still continue to Reflect
        parse metrics from results.md
        check criteria
- 
+       if criteria passed:
+           still run reflect, then stop before next run
+
        # Step 3: Reflect
        build context_reflect.md
        spawn master → writes reflect.md, updates tree_search.md
- 
-       regenerate CLAUDE.md / AGENTS.md
    ```
    Handle: SIGINT/SIGTERM graceful shutdown (finish current step, then stop), agent crash recovery (log error, mark run as failed in tree, continue to next), 1-hour child process timeout.
  
 7. **`helix/cli.py`** — Typer CLI: `helix run`, `helix status` (parse tree_search.md for best/current), `helix history` (scan tree_search.md + runs/), `helix stop` (write `.helix/stop` signal file), `helix config init|show|set`, `helix agents list|add|remove`.
  
-8. **`templates/blank/`** — Minimal starter files: `goal.md` template, empty `tree_search.md`, sample `evaluate.sh`, default `helix.toml` + `config.yaml`.
+8. **`templates/blank/`** — Minimal starter files: `goal.md` template, `master_agent.md`, `researcher_agent.md`, empty `tree_search.md`, sample `evaluate.sh`, default `helix.toml` + `config.yaml`.
  
-9. **Tests** — pytest. Mock `subprocess.Popen` for agent tests. Use `tmp_path` for workspace tests. Test tree_search.md parsing. Test full loop with mock agents that write predictable idea.md/results.md.
+9. **Tests** — pytest. Mock `subprocess.Popen` for agent tests. Use `tmp_path` for workspace tests. Test tree_search.md parsing. Test staged brainstorm selection parsing/validation. Test full loop with mock agents that write predictable staged selections, idea.md/results.md, and reflect.md.
  
 ### Phase 2 — Setup
  

@@ -104,27 +104,55 @@ def get_frontier_runs(nodes: list[TreeNode]) -> list[TreeNode]:
     return [n for n in nodes if n.status.lower() == "frontier"]
 
 
+def get_node_by_number(nodes: list[TreeNode], tree_number: str) -> TreeNode | None:
+    """Fetch a tree node by its display number."""
+    return next((node for node in nodes if node.number == tree_number), None)
+
+
+def is_dead_end(node: TreeNode) -> bool:
+    """Return True when a node is marked as a dead end."""
+    return "dead-end" in node.status.lower()
+
+
+def next_top_level_run_id(workspace: Path) -> str:
+    """Compute the next top-level run ID."""
+    nodes = parse_tree_search(workspace)
+    top_level = [int(n.number) for n in nodes if "." not in n.number]
+    next_num = max(top_level, default=0) + 1
+    return str(next_num)
+
+
+def next_child_run_id(workspace: Path, parent_tree_number: str) -> str:
+    """Compute the next child run ID for a parent tree number like '2.1'."""
+    nodes = parse_tree_search(workspace)
+    prefix = parent_tree_number + "."
+    children = [
+        int(n.number.split(".")[-1])
+        for n in nodes
+        if n.number.startswith(prefix) and n.number.count(".") == parent_tree_number.count(".") + 1
+    ]
+    next_child = max(children, default=0) + 1
+    return RunState.tree_number_to_id(f"{parent_tree_number}.{next_child}")
+
+
+def increment_run_id(run_id: str) -> str:
+    """Increment the final segment of a run ID, preserving its parent path."""
+    if "_" not in run_id:
+        return str(int(run_id) + 1)
+
+    parts = run_id.split("_")
+    parts[-1] = str(int(parts[-1]) + 1)
+    return "_".join(parts)
+
+
 def next_run_id(workspace: Path, parent_id: str | None = None) -> str:
     """Compute the next run ID.
 
     If parent_id is given, find max child and increment.
     Otherwise, find max top-level number and increment.
     """
-    nodes = parse_tree_search(workspace)
-
     if parent_id is None:
-        # Next top-level number
-        top_level = [int(n.number) for n in nodes if "." not in n.number]
-        next_num = max(top_level, default=0) + 1
-        return str(next_num)
+        return next_top_level_run_id(workspace)
 
     # Next child of parent
-    parent_tree = RunState.id_to_tree_number(parent_id)
-    prefix = parent_tree + "."
-    children = [
-        int(n.number.split(".")[-1])
-        for n in nodes
-        if n.number.startswith(prefix) and n.number.count(".") == parent_tree.count(".") + 1
-    ]
-    next_child = max(children, default=0) + 1
-    return RunState.tree_number_to_id(f"{parent_tree}.{next_child}")
+    return next_child_run_id(workspace, RunState.id_to_tree_number(parent_id))

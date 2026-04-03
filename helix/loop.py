@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import shutil
 from pathlib import Path
 
 from rich.console import Console
@@ -12,17 +13,27 @@ from helix.agents import spawn_agent
 from helix.config import GlobalConfig, WorkspaceConfig
 from helix.context import (
     build_brainstorm_context,
-    build_execute_context,
+    build_execute_plan_context,
+    build_execute_run_context,
     build_reflect_context,
-    generate_agent_md,
+    validate_instruction_files,
 )
+from helix.models import BranchSelection, SuccessEvaluation
 from helix.runs import (
     create_run_folder,
-    get_frontier_runs,
-    next_run_id,
+    increment_run_id,
+    next_child_run_id,
+    next_top_level_run_id,
     parse_results,
     parse_tree_search,
 )
+from helix.selection import (
+    BrainstormSelectionError,
+    get_brainstorm_selection_path,
+    parse_brainstorm_selection,
+    validate_branch_selection,
+)
+from helix.success import evaluate_success, load_success_criteria
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -71,28 +82,34 @@ class HelixLoop:
             return True
         return False
 
-    def _determine_run_id(self) -> str:
-        """Pick a frontier node or create a new top-level run."""
-        nodes = parse_tree_search(self.workspace)
-        frontiers = get_frontier_runs(nodes)
+    def _assign_run_id(self, selection: BranchSelection) -> str:
+        """Compute the concrete run ID from a validated branch selection."""
+        if selection.mode == "top_level":
+            run_id = next_top_level_run_id(self.workspace)
+        else:
+            assert selection.parent is not None
+            run_id = next_child_run_id(self.workspace, selection.parent)
 
-        if frontiers:
-            # Pick the first frontier node that hasn't already failed
-            for frontier in frontiers:
-                run_id = frontier.number.replace(".", "_")
-                if run_id not in self._failed_run_ids:
-                    logger.info("Picked frontier run: %s", frontier.number)
-                    return run_id
-
-        # No usable frontier — create a new top-level run
-        # Account for both existing tree nodes and previously failed IDs
-        run_id = next_run_id(self.workspace, parent_id=None)
         while run_id in self._failed_run_ids:
-            run_id = str(int(run_id) + 1)
+            run_id = increment_run_id(run_id)
+
         return run_id
+
+    def _move_brainstorm_logs(self, temp_log_dir: Path, run_dir: Path) -> None:
+        """Move staged brainstorm logs into the final run folder."""
+        if not temp_log_dir.exists():
+            return
+
+        target_dir = run_dir / "logs" / "brainstorm"
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(temp_log_dir), str(target_dir))
 
     def run(self, max_runs: int = 100) -> None:
         """Run the helix loop."""
+        validate_instruction_files(self.workspace)
+        success_criteria = load_success_criteria(self.workspace)
         self._install_signal_handlers()
         timeout = self.global_config.get_default("agent_timeout_seconds") or 3600
         master = self.workspace_config.get_master()
@@ -103,57 +120,121 @@ class HelixLoop:
                 if self._shutdown_requested or self._check_stop_file():
                     break
 
-                run_id = self._determine_run_id()
-                tree_number = run_id.replace("_", ".")
-                console.rule(f"[bold blue]Run {tree_number}[/bold blue] ({run_count}/{max_runs})")
-
-                run_dir = create_run_folder(self.workspace, run_id)
-                log_dir = run_dir / "logs"
+                console.rule(f"[bold blue]Cycle {run_count}[/bold blue] ({run_count}/{max_runs})")
+                staged_brainstorm_path = get_brainstorm_selection_path(self.workspace)
+                if staged_brainstorm_path.exists():
+                    staged_brainstorm_path.unlink()
+                brainstorm_log_dir = self.workspace / ".helix" / "logs" / f"brainstorm_{run_count}"
+                if brainstorm_log_dir.exists():
+                    shutil.rmtree(brainstorm_log_dir)
 
                 # --- Step 1: Brainstorm ---
                 console.print("[bold cyan]Step 1: Brainstorm[/bold cyan]")
                 try:
-                    ctx = build_brainstorm_context(self.workspace, run_id)
-                    result = spawn_agent(master, ctx, log_dir / "brainstorm", timeout=timeout)
+                    ctx = build_brainstorm_context(self.workspace)
+                    result = spawn_agent(master, ctx, brainstorm_log_dir, timeout=timeout)
                     if result.exit_code != 0:
                         console.print(f"[red]Master brainstorm failed (exit {result.exit_code})[/red]")
                         if result.stderr:
                             console.print(f"[dim red]stderr: {result.stderr[:500]}[/dim red]")
                         if result.stdout:
                             console.print(f"[dim red]stdout: {result.stdout[:500]}[/dim red]")
-                        logger.error("Brainstorm failed for run %s: exit %d", run_id, result.exit_code)
-                        self._failed_run_ids.add(run_id)
+                        logger.error("Brainstorm failed in cycle %d: exit %d", run_count, result.exit_code)
                         continue
+
+                    selection, _idea_body = parse_brainstorm_selection(staged_brainstorm_path)
+                    nodes = parse_tree_search(self.workspace)
+                    validate_branch_selection(selection, nodes)
+                    run_id = self._assign_run_id(selection)
+                    tree_number = run_id.replace("_", ".")
+                    run_dir = create_run_folder(self.workspace, run_id)
+                    log_dir = run_dir / "logs"
+                    (run_dir / "idea.md").write_text(staged_brainstorm_path.read_text())
+                    self._move_brainstorm_logs(brainstorm_log_dir, run_dir)
+                    console.print(
+                        f"[green]Selected run {tree_number}[/green]: {selection.title}"
+                    )
+                except BrainstormSelectionError as exc:
+                    logger.error("Invalid brainstorm selection in cycle %d: %s", run_count, exc)
+                    console.print(f"[red]{exc}[/red]")
+                    continue
                 except Exception:
-                    logger.exception("Brainstorm crashed for run %s", run_id)
-                    console.print("[red]Master brainstorm crashed — skipping run[/red]")
-                    self._failed_run_ids.add(run_id)
+                    logger.exception("Brainstorm crashed in cycle %d", run_count)
+                    console.print("[red]Master brainstorm crashed — skipping cycle[/red]")
                     continue
 
                 if self._shutdown_requested or self._check_stop_file():
                     break
 
+                success_evaluation: SuccessEvaluation | None = None
+
                 # --- Step 2: Execute ---
                 console.print("[bold cyan]Step 2: Execute[/bold cyan]")
+                plan_path = self.workspace / "runs" / run_id / "plan.md"
+                plan_failed = False
+                plan_missing_warned = False
+
+                console.print("[cyan]  Plan[/cyan]")
                 try:
-                    ctx = build_execute_context(self.workspace, run_id)
-                    result = spawn_agent(researcher, ctx, log_dir / "execute", timeout=timeout)
+                    ctx = build_execute_plan_context(self.workspace, run_id)
+                    result = spawn_agent(researcher, ctx, log_dir / "execute_plan", timeout=timeout)
                     if result.exit_code != 0:
-                        console.print(f"[red]Researcher execute failed (exit {result.exit_code})[/red]")
+                        console.print(f"[red]Researcher plan failed (exit {result.exit_code})[/red]")
                         if result.stderr:
                             console.print(f"[dim red]stderr: {result.stderr[:500]}[/dim red]")
                         if result.stdout:
                             console.print(f"[dim red]stdout: {result.stdout[:500]}[/dim red]")
-                        logger.error("Execute failed for run %s: exit %d", run_id, result.exit_code)
-                        # Still try to reflect on partial results
-
-                    # Parse results if available
-                    parsed = parse_results(self.workspace, run_id)
-                    if parsed.metrics:
-                        console.print(f"  Metrics: {parsed.metrics}")
+                        logger.error("Plan failed for run %s: exit %d", run_id, result.exit_code)
+                        plan_failed = True
                 except Exception:
-                    logger.exception("Execute crashed for run %s", run_id)
-                    console.print("[red]Researcher execute crashed[/red]")
+                    logger.exception("Execute plan crashed for run %s", run_id)
+                    console.print("[red]Researcher plan crashed[/red]")
+                    plan_failed = True
+
+                if not plan_path.exists():
+                    console.print(
+                        f"[yellow]Warning: plan.md missing for run {tree_number} — skipping Execute Run[/yellow]"
+                    )
+                    self._failed_run_ids.add(run_id)
+                    plan_failed = True
+                    plan_missing_warned = True
+
+                if not plan_failed:
+                    if self._shutdown_requested or self._check_stop_file():
+                        break
+
+                    console.print("[cyan]  Run[/cyan]")
+                    try:
+                        ctx = build_execute_run_context(self.workspace, run_id)
+                        result = spawn_agent(researcher, ctx, log_dir / "execute_run", timeout=timeout)
+                        if result.exit_code != 0:
+                            console.print(f"[red]Researcher run failed (exit {result.exit_code})[/red]")
+                            if result.stderr:
+                                console.print(f"[dim red]stderr: {result.stderr[:500]}[/dim red]")
+                            if result.stdout:
+                                console.print(f"[dim red]stdout: {result.stdout[:500]}[/dim red]")
+                            logger.error("Run failed for run %s: exit %d", run_id, result.exit_code)
+                            # Still try to reflect on partial results
+
+                        parsed = parse_results(self.workspace, run_id)
+                        if parsed.metrics:
+                            console.print(f"  Metrics: {parsed.metrics}")
+                        success_evaluation = evaluate_success(success_criteria, parsed.metrics)
+                        if success_evaluation.passed:
+                            console.print(f"[green]  Success check: {success_evaluation.summary}[/green]")
+                        elif success_evaluation.missing_metrics:
+                            console.print(f"[yellow]  Success check: {success_evaluation.summary}[/yellow]")
+                        else:
+                            console.print(f"[yellow]  Success check: {success_evaluation.summary}[/yellow]")
+                    except Exception:
+                        logger.exception("Execute run crashed for run %s", run_id)
+                        console.print("[red]Researcher run crashed[/red]")
+                        success_evaluation = evaluate_success(success_criteria, {})
+                        console.print(f"[yellow]  Success check: {success_evaluation.summary}[/yellow]")
+                else:
+                    console.print("[yellow]Skipping Execute Run because the planning step did not finish cleanly.[/yellow]")
+                    success_evaluation = evaluate_success(success_criteria, {})
+                    console.print(f"[yellow]  Success check: {success_evaluation.summary}[/yellow]")
 
                 if self._shutdown_requested or self._check_stop_file():
                     break
@@ -161,7 +242,11 @@ class HelixLoop:
                 # --- Step 3: Reflect ---
                 console.print("[bold cyan]Step 3: Reflect[/bold cyan]")
                 try:
-                    ctx = build_reflect_context(self.workspace, run_id)
+                    ctx = build_reflect_context(
+                        self.workspace,
+                        run_id,
+                        success_evaluation=success_evaluation,
+                    )
                     result = spawn_agent(master, ctx, log_dir / "reflect", timeout=timeout)
                     if result.exit_code != 0:
                         console.print(f"[red]Master reflect failed (exit {result.exit_code})[/red]")
@@ -176,6 +261,10 @@ class HelixLoop:
 
                 # --- Post-run validation ---
                 # Check if critical files were actually produced
+                if not plan_path.exists() and not plan_missing_warned:
+                    console.print(f"[yellow]Warning: plan.md missing for run {tree_number} — marking as incomplete[/yellow]")
+                    self._failed_run_ids.add(run_id)
+
                 results_path = self.workspace / "runs" / run_id / "results.md"
                 if not results_path.exists():
                     console.print(f"[yellow]Warning: results.md missing for run {tree_number} — marking as incomplete[/yellow]")
@@ -188,9 +277,17 @@ class HelixLoop:
                     console.print(f"[yellow]Warning: tree_search.md not updated for run {tree_number} — marking as incomplete[/yellow]")
                     self._failed_run_ids.add(run_id)
 
-                # Regenerate CLAUDE.md / AGENTS.md
-                generate_agent_md(self.workspace)
                 console.print(f"[green]Run {tree_number} complete.[/green]\n")
+
+                if success_evaluation and success_evaluation.missing_metrics:
+                    console.print(
+                        f"[yellow]Run {tree_number} missing metrics required for success checking — marked as incomplete.[/yellow]"
+                    )
+                    self._failed_run_ids.add(run_id)
+
+                if success_evaluation and success_evaluation.passed:
+                    console.print("[bold green]Success criteria met — stopping after this run.[/bold green]")
+                    break
 
         finally:
             self._restore_signal_handlers()
