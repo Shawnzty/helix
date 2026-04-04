@@ -52,7 +52,7 @@ helix config set anthropic_api_key "sk-ant-..."
 helix run
 ```
 
-`helix init --mode conversational` uses a setup LLM to draft the workspace from a paragraph. `helix init --mode local` validates files you already placed in the project folder, reports what is missing or invalid, and offers to scaffold only the gaps. When `helix.toml` is created or regenerated, setup asks separately for master and researcher model IDs plus their provider-aware `thinking_level` values.
+`helix init --mode conversational` uses a setup LLM to draft the workspace from either a typed paragraph or a local Markdown file. `helix init --mode local` validates files you already placed in the project folder, reports what is missing or invalid, and offers to scaffold only the gaps. When `helix.toml` is created or regenerated, setup asks separately for master and researcher model IDs plus their provider-aware `thinking_level` values.
 
 ## CLI Commands
 

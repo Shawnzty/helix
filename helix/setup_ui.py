@@ -13,6 +13,7 @@ from helix.models import WorkspaceAudit
 
 SetupMode = Literal["conversational", "local"]
 WorkspaceAction = Literal["keep", "regenerate", "cancel"]
+RequirementSource = Literal["paragraph", "markdown_file"]
 
 
 class SetupUI(Protocol):
@@ -30,7 +31,11 @@ class SetupUI(Protocol):
 
     def prompt_secret(self, message: str) -> str: ...
 
+    def choose_requirement_source(self) -> RequirementSource: ...
+
     def prompt_paragraph(self) -> str: ...
+
+    def prompt_markdown_path(self) -> str: ...
 
     def prompt_model_choice(
         self,
@@ -122,9 +127,20 @@ class ConsoleSetupUI:
     def prompt_secret(self, message: str) -> str:
         return typer.prompt(message, hide_input=True).strip()
 
+    def choose_requirement_source(self) -> RequirementSource:
+        self.console.print("[bold]Choose requirement input source[/bold]")
+        self.console.print("1. Type requirement as a paragraph")
+        self.console.print("2. Load requirement from a local Markdown file")
+        choice = typer.prompt("Requirement source", default="1").strip()
+        return "markdown_file" if choice == "2" else "paragraph"
+
     def prompt_paragraph(self) -> str:
         self.console.print("[bold]Describe your research task[/bold]")
         return typer.prompt("Paragraph").strip()
+
+    def prompt_markdown_path(self) -> str:
+        self.console.print("[bold]Load research task from a Markdown file[/bold]")
+        return typer.prompt("Markdown file path").strip()
 
     def prompt_model_choice(
         self,

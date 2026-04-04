@@ -9,6 +9,7 @@ import pytest
 from helix.models import SetupDraft
 from helix.setup import (
     SetupCancelled,
+    SetupError,
     _SETUP_SYSTEM_PROMPT,
     audit_workspace,
     run_setup_flow,
@@ -27,6 +28,8 @@ class FakeUI:
         file_selections: list[list[str]] | None = None,
         model_choices: list[str] | None = None,
         thinking_choices: list[str] | None = None,
+        requirement_source: str = "paragraph",
+        markdown_path: str = "",
         paragraph: str = "Optimize training below 1.05 without touching prepare.py.",
     ) -> None:
         self.mode = mode
@@ -37,6 +40,8 @@ class FakeUI:
         self.file_selections = file_selections or []
         self.model_choices = model_choices or []
         self.thinking_choices = thinking_choices or []
+        self.requirement_source = requirement_source
+        self.markdown_path = markdown_path
         self.paragraph = paragraph
         self.audit_snapshots = []
         self.review_calls: list[tuple[list[str], list[str]]] = []
@@ -66,8 +71,14 @@ class FakeUI:
             return self.secrets.pop(0)
         return ""
 
+    def choose_requirement_source(self) -> str:
+        return self.requirement_source
+
     def prompt_paragraph(self) -> str:
         return self.paragraph
+
+    def prompt_markdown_path(self) -> str:
+        return self.markdown_path
 
     def prompt_model_choice(self, role: str, default_model: str, preset_models):
         if self.model_choices:
@@ -110,10 +121,18 @@ class FakeSetupClient:
     def __init__(self, drafts: list[SetupDraft]) -> None:
         self.drafts = drafts
         self.calls: list[tuple[str, list[tuple[str, str]]]] = []
+        self.repair_calls: list[tuple[str, str, str]] = []
+        self.repaired_goal_md: str | None = None
 
-    def generate(self, paragraph: str, follow_ups: list[tuple[str, str]]) -> SetupDraft:
-        self.calls.append((paragraph, list(follow_ups)))
+    def generate(self, requirement_text: str, follow_ups: list[tuple[str, str]]) -> SetupDraft:
+        self.calls.append((requirement_text, list(follow_ups)))
         return self.drafts.pop(0)
+
+    def repair_goal_md(self, *, requirement_text: str, invalid_goal_md: str, parser_error: str) -> str:
+        self.repair_calls.append((requirement_text, invalid_goal_md, parser_error))
+        if self.repaired_goal_md is None:
+            raise AssertionError("repair_goal_md called without a configured repaired_goal_md")
+        return self.repaired_goal_md
 
 
 def _write_valid_workspace(workspace: Path) -> None:
@@ -224,6 +243,9 @@ class TestConversationalSetup:
         assert (tmp_path / "setup_transcript.md").exists()
         assert "sk-test" in (tmp_path / "config.yaml").read_text()
         assert client.calls[0][0].startswith("Optimize training")
+        transcript = (tmp_path / "setup_transcript.md").read_text()
+        assert "Requirement source: paragraph" in transcript
+        assert "## Initial Requirement Input" in transcript
         helix_toml = (tmp_path / "helix.toml").read_text()
         assert 'model = "claude-sonnet-4-6"' in helix_toml
         assert 'thinking_level = "high"' in helix_toml
@@ -232,6 +254,233 @@ class TestConversationalSetup:
         assert ui.thinking_prompts[0][3] == "effort"
         assert ui.thinking_prompts[1][2] == ("none", "low", "medium", "high", "xhigh")
         assert ui.thinking_prompts[1][3] == "reasoning effort"
+        assert client.repair_calls == []
+
+    def test_markdown_file_requirement_is_loaded(self, tmp_path):
+        requirement_path = tmp_path / "docs" / "requirements.md"
+        requirement_path.parent.mkdir(parents=True)
+        requirement_path.write_text("# Research Task\n\nOptimize train.py within 5 minutes.\n")
+        ui = FakeUI(
+            mode="conversational",
+            requirement_source="markdown_file",
+            markdown_path="docs/requirements.md",
+            yes_no=[True, False, True],
+            secrets=["sk-test"],
+            model_choices=["claude-sonnet-4-6", "gpt-5.4"],
+            thinking_choices=["high", "xhigh"],
+        )
+        client = FakeSetupClient([
+            SetupDraft(
+                summary="Workspace drafted from markdown.",
+                goal_md="# Goal\n\n## Success Criteria\n\n```yaml\nall:\n  - metric: val_bpb\n    op: \"<\"\n    value: 1.05\n```\n\n## Boundary\n\nOnly edit train.py.\n\n## Evaluation\n\nRun evaluate.sh.\n\n## Limitation\n\nSingle H100.\n",
+                master_agent_md="# Master Agent Instructions\n\nProject summary.\n",
+                researcher_agent_md="# Researcher Agent Instructions\n\nProject summary.\n",
+            )
+        ])
+
+        run_setup_flow(
+            tmp_path,
+            ui,
+            mode="conversational",
+            setup_model="gpt-5.4",
+            setup_client=client,
+        )
+
+        assert client.calls[0][0].startswith("# Research Task")
+        transcript = (tmp_path / "setup_transcript.md").read_text()
+        assert "Requirement source: markdown file" in transcript
+        assert str(requirement_path.resolve()) in transcript
+        assert "# Research Task" in transcript
+
+    def test_invalid_goal_md_is_repaired_once_before_write(self, tmp_path):
+        ui = FakeUI(
+            mode="conversational",
+            yes_no=[True, False, True],
+            secrets=["sk-test"],
+        )
+        client = FakeSetupClient([
+            SetupDraft(
+                summary="Initial draft had a non-canonical success block.",
+                goal_md="# Goal\n\n## Success Criteria\n\n```yaml\nprimary_metric:\n  name: sharpe_ratio\n  threshold: 3.0\n```\n\n## Boundary\n\nOnly edit train.py.\n\n## Evaluation\n\nRun evaluate.sh.\n\n## Limitation\n\nSingle H100.\n",
+                master_agent_md="# Master Agent Instructions\n\nProject summary.\n",
+                researcher_agent_md="# Researcher Agent Instructions\n\nProject summary.\n",
+            )
+        ])
+        client.repaired_goal_md = (
+            "# Goal\n\n"
+            "Optimize training.\n\n"
+            "## Success Criteria\n\n"
+            "```yaml\n"
+            "all:\n"
+            "  - metric: sharpe_ratio\n"
+            "    op: \">=\"\n"
+            "    value: 3.0\n"
+            "```\n\n"
+            "## Boundary\n\n"
+            "Only edit train.py.\n\n"
+            "## Evaluation\n\n"
+            "Run evaluate.sh.\n\n"
+            "## Limitation\n\n"
+            "Single H100.\n"
+        )
+
+        audit = run_setup_flow(
+            tmp_path,
+            ui,
+            mode="conversational",
+            setup_model="gpt-5.4",
+            setup_client=client,
+        )
+
+        assert audit.is_initialized() is True
+        assert len(client.repair_calls) == 1
+        assert "all:" in (tmp_path / "goal.md").read_text()
+        transcript = (tmp_path / "setup_transcript.md").read_text()
+        assert "Repair note: goal.md required one automatic repair pass" in transcript
+
+    def test_invalid_goal_md_after_repair_aborts_before_write(self, tmp_path):
+        ui = FakeUI(
+            mode="conversational",
+            yes_no=[True, False, True],
+            secrets=["sk-test"],
+        )
+        client = FakeSetupClient([
+            SetupDraft(
+                summary="Initial draft had a non-canonical success block.",
+                goal_md="# Goal\n\n## Success Criteria\n\n```yaml\nprimary_metric:\n  name: sharpe_ratio\n  threshold: 3.0\n```\n\n## Boundary\n\nOnly edit train.py.\n\n## Evaluation\n\nRun evaluate.sh.\n\n## Limitation\n\nSingle H100.\n",
+                master_agent_md="# Master Agent Instructions\n\nProject summary.\n",
+                researcher_agent_md="# Researcher Agent Instructions\n\nProject summary.\n",
+            )
+        ])
+        client.repaired_goal_md = (
+            "# Goal\n\n"
+            "## Success Criteria\n\n"
+            "```yaml\n"
+            "primary_metric:\n"
+            "  name: sharpe_ratio\n"
+            "```\n\n"
+            "## Boundary\n\n.\n\n## Evaluation\n\n.\n\n## Limitation\n\n.\n"
+        )
+
+        with pytest.raises(SetupError, match="remained invalid after one automatic repair attempt"):
+            run_setup_flow(
+                tmp_path,
+                ui,
+                mode="conversational",
+                setup_model="gpt-5.4",
+                setup_client=client,
+            )
+
+        assert not (tmp_path / "goal.md").exists()
+        assert not (tmp_path / "master_agent.md").exists()
+        assert len(client.repair_calls) == 1
+
+    def test_markdown_file_requirement_uses_relative_workspace_path(self, tmp_path):
+        requirement_path = tmp_path / "brief.md"
+        requirement_path.write_text("Research task from a relative path.\n")
+        ui = FakeUI(
+            mode="conversational",
+            requirement_source="markdown_file",
+            markdown_path="brief.md",
+            yes_no=[True, False, True],
+            secrets=["sk-test"],
+        )
+        client = FakeSetupClient([
+            SetupDraft(
+                summary="Workspace drafted from markdown.",
+                goal_md="# Goal\n\n## Success Criteria\n\n```yaml\nall:\n  - metric: x\n    op: \"==\"\n    value: true\n```\n\n## Boundary\n\n.\n\n## Evaluation\n\n.\n\n## Limitation\n\n.\n",
+                master_agent_md="# Master\n",
+                researcher_agent_md="# Researcher\n",
+            )
+        ])
+
+        run_setup_flow(
+            tmp_path,
+            ui,
+            mode="conversational",
+            setup_model="gpt-5.4",
+            setup_client=client,
+        )
+
+        assert client.calls[0][0] == "Research task from a relative path."
+
+    def test_missing_markdown_file_errors_cleanly(self, tmp_path):
+        ui = FakeUI(
+            mode="conversational",
+            requirement_source="markdown_file",
+            markdown_path="missing.md",
+            yes_no=[True],
+            secrets=["sk-test"],
+        )
+
+        with pytest.raises(SetupError, match="Markdown requirement file not found"):
+            run_setup_flow(
+                tmp_path,
+                ui,
+                mode="conversational",
+                setup_model="gpt-5.4",
+                setup_client=FakeSetupClient([]),
+            )
+
+    def test_non_markdown_requirement_file_is_rejected(self, tmp_path):
+        source_path = tmp_path / "notes.txt"
+        source_path.write_text("not markdown\n")
+        ui = FakeUI(
+            mode="conversational",
+            requirement_source="markdown_file",
+            markdown_path="notes.txt",
+            yes_no=[True],
+            secrets=["sk-test"],
+        )
+
+        with pytest.raises(SetupError, match=r"\.md extension"):
+            run_setup_flow(
+                tmp_path,
+                ui,
+                mode="conversational",
+                setup_model="gpt-5.4",
+                setup_client=FakeSetupClient([]),
+            )
+
+    def test_empty_markdown_requirement_file_is_rejected(self, tmp_path):
+        source_path = tmp_path / "empty.md"
+        source_path.write_text("   \n")
+        ui = FakeUI(
+            mode="conversational",
+            requirement_source="markdown_file",
+            markdown_path="empty.md",
+            yes_no=[True],
+            secrets=["sk-test"],
+        )
+
+        with pytest.raises(SetupError, match="Markdown requirement file is empty"):
+            run_setup_flow(
+                tmp_path,
+                ui,
+                mode="conversational",
+                setup_model="gpt-5.4",
+                setup_client=FakeSetupClient([]),
+            )
+
+    def test_directory_markdown_requirement_path_is_rejected(self, tmp_path):
+        source_dir = tmp_path / "notes.md"
+        source_dir.mkdir()
+        ui = FakeUI(
+            mode="conversational",
+            requirement_source="markdown_file",
+            markdown_path="notes.md",
+            yes_no=[True],
+            secrets=["sk-test"],
+        )
+
+        with pytest.raises(SetupError, match="must be a file"):
+            run_setup_flow(
+                tmp_path,
+                ui,
+                mode="conversational",
+                setup_model="gpt-5.4",
+                setup_client=FakeSetupClient([]),
+            )
 
     def test_missing_api_key_cancels_before_llm_call(self, tmp_path, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -307,6 +556,7 @@ class TestConversationalSetup:
         )
 
         transcript = (tmp_path / "setup_transcript.md").read_text()
+        assert "Requirement source: paragraph" in transcript
         assert "What is the runtime budget?" in transcript
         assert "Single H100, 5 minutes." in transcript
         assert len(client.calls) == 2
@@ -316,3 +566,10 @@ class TestSetupPrompt:
     def test_system_prompt_discourages_framework_duplication(self):
         assert "do not duplicate framework mechanics" in _SETUP_SYSTEM_PROMPT.lower()
         assert "durable, project-specific preferences" in _SETUP_SYSTEM_PROMPT.lower()
+
+    def test_system_prompt_includes_exact_success_criteria_schema(self):
+        prompt = _SETUP_SYSTEM_PROMPT.lower()
+        assert "exactly one of `all` or `any`" in prompt
+        assert "`metric`, `op`, `value`" in prompt
+        assert "do not use alternative yaml layouts" in prompt
+        assert "primary_metric" in prompt

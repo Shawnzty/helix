@@ -189,6 +189,7 @@ class SetupDraft(BaseModel):
     goal_md: str | None = None
     master_agent_md: str | None = None
     researcher_agent_md: str | None = None
+    repair_note: str | None = None
 
     @field_validator("follow_up_questions")
     @classmethod

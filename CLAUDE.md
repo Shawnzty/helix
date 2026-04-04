@@ -68,7 +68,7 @@ Build and test in this order:
  
 1. **`helix/setup.py`** — Dual-mode setup engine. Conversational mode calls GPT-5.4 to draft `goal.md`, `master_agent.md`, and `researcher_agent.md`, scaffolds `tree_search.md` and `helix.toml`, and saves `setup_transcript.md`. Local mode audits the 5-file init contract (`goal.md`, `master_agent.md`, `researcher_agent.md`, `helix.toml`, `tree_search.md`) and offers targeted scaffolding or repair with `.bak` backups.
  
-2. **`helix/setup_ui.py`** — Rich terminal: mode picker, workspace audit table, paragraph input, follow-up questions, review/approval screens, and config/API-key prompts.
+2. **`helix/setup_ui.py`** — Rich terminal: mode picker, workspace audit table, requirement-source picker (typed paragraph or Markdown file), follow-up questions, review/approval screens, and config/API-key prompts.
  
 3. **CLI**: `helix init [--path] [--mode conversational|local] [--setup-model]`, `helix setup [--path] [--mode conversational|local] [--setup-model]`
  

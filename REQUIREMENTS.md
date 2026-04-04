@@ -133,18 +133,22 @@ The number encodes lineage: `2.1.1` is a child of `2.1`, which is a child of `2`
 ## 3. Setup
 
 `helix init` supports two setup modes:
-- **Conversational** — draft the workspace from a paragraph with a setup LLM
+- **Conversational** — draft the workspace from a typed paragraph or local Markdown file with a setup LLM
 - **Local files** — validate files already present in the project folder and scaffold only the missing or invalid ones
 
 Helix treats these 5 files as the initialization contract: `goal.md`, `master_agent.md`, `researcher_agent.md`, `helix.toml`, and `tree_search.md`.
 Whenever setup creates or replaces `helix.toml`, it should ask separately for the master and researcher model IDs and provider-aware `thinking_level` values.
 
-### 3.1 Paragraph-First
+### 3.1 Paragraph Or Markdown File
 
-User describes their task in free-form text. The setup LLM (GPT-5.4 by default) auto-extracts all fields. Only asks follow-up questions for genuinely missing info (max 2–3 questions).
+User provides their task either as free-form text or by loading a local `.md` file. The setup LLM (GPT-5.4 by default) auto-extracts all fields. Only asks follow-up questions for genuinely missing info (max 2–3 questions).
 
 ```
 $ helix init
+
+Choose requirement input source:
+1. Type requirement as a paragraph
+2. Load requirement from a local Markdown file
 
 Describe your research task:
 > I want to optimize train.py to get val_bpb below 1.05 on a single
@@ -449,9 +453,9 @@ Build and test in this order:
  
 ### Phase 2 — Setup
  
-1. **`helix/setup.py`** — Paragraph-first setup engine. User types free-form text. Call GPT-5.4 API to extract goal/criteria/boundary/evaluation/limitation. If info missing, LLM asks max 2-3 follow-ups. Write `goal.md`, empty `tree_search.md`, default `helix.toml`, `config.yaml` (prompt for API keys if not present). Save transcript to `setup_transcript.md`.
+1. **`helix/setup.py`** — Conversational setup engine. User either types free-form text or loads a local Markdown file. Call GPT-5.4 API to extract goal/criteria/boundary/evaluation/limitation. If info missing, LLM asks max 2-3 follow-ups. Write `goal.md`, empty `tree_search.md`, default `helix.toml`, `config.yaml` (prompt for API keys if not present). Save transcript to `setup_transcript.md`.
  
-2. **`helix/setup_ui.py`** — Rich terminal: prompt for paragraph input, render LLM follow-up questions with markdown formatting, display generated `goal.md` for user review/approval, prompt for API keys.
+2. **`helix/setup_ui.py`** — Rich terminal: prompt for requirement source (paragraph or Markdown file), render LLM follow-up questions with markdown formatting, display generated `goal.md` for user review/approval, prompt for API keys.
  
 3. **CLI**: `helix init [--path] [--setup-model]`, `helix setup [--path]`
  
@@ -478,7 +482,7 @@ helix/
 │   ├── config.py          # Global yaml + workspace toml
 │   ├── models.py
 │   ├── llm.py             # Anthropic + OpenAI client
-│   ├── setup.py           # Paragraph-first setup engine
+│   ├── setup.py           # Conversational setup engine (paragraph or Markdown file)
 │   ├── loop.py            # 3-step helix loop
 │   ├── agents.py          # Subprocess management (full permissions)
 │   ├── context.py         # Context builder (3 types)

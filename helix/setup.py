@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -25,7 +26,7 @@ from helix.config import (
     validate_thinking_level_for_agent,
 )
 from helix.models import SetupDraft, WorkspaceAudit, WorkspaceFileAudit
-from helix.setup_ui import SetupMode, SetupUI
+from helix.setup_ui import RequirementSource, SetupMode, SetupUI
 from helix.success import SuccessCriteriaError, parse_success_criteria
 
 CORE_FILES = (
@@ -75,6 +76,7 @@ _SETUP_SCHEMA = {
         "goal_md": {"type": ["string", "null"]},
         "master_agent_md": {"type": ["string", "null"]},
         "researcher_agent_md": {"type": ["string", "null"]},
+        "repair_note": {"type": ["string", "null"]},
     },
     "required": [
         "summary",
@@ -83,6 +85,7 @@ _SETUP_SCHEMA = {
         "goal_md",
         "master_agent_md",
         "researcher_agent_md",
+        "repair_note",
     ],
 }
 _SETUP_SYSTEM_PROMPT = """You are Helix setup, the initialization assistant for a file-native autonomous research framework.
@@ -97,13 +100,54 @@ Important rules:
 - Do not duplicate framework mechanics like status labels, staged brainstorm file formats, or tree update syntax.
 - Keep role files focused on durable, project-specific preferences.
 - goal.md must contain these sections in order: # Goal, ## Success Criteria, ## Boundary, ## Evaluation, ## Limitation.
-- The Success Criteria section must contain a fenced YAML block with machine-checkable criteria. Prefer concrete metrics and thresholds.
+- The Success Criteria section must contain a fenced YAML block with machine-checkable criteria.
+- The YAML block must define exactly one of `all` or `any`.
+- Each criterion item must use exactly these keys: `metric`, `op`, `value`.
+- Use only these operators: `<`, `<=`, `>`, `>=`, `==`, `!=`.
+- Valid example:
+```yaml
+all:
+  - metric: sharpe_ratio
+    op: ">="
+    value: 3.0
+  - metric: max_drawdown_pct
+    op: "<="
+    value: 20
+```
+- Do not use alternative YAML layouts such as `primary_metric`, `secondary_metric`, `backtest_constraints`, `reporting_metrics_required`, `operational_limits`, or any other custom keys under `## Success Criteria`.
+- Put richer constraints, objectives, and evaluation rules in `## Boundary`, `## Evaluation`, or `## Limitation`, not in the machine-checkable YAML block.
 - master_agent.md should summarize the project and stable preferences for how the master should prioritize ideas, weigh risk, use external research, and reason over past work.
 - researcher_agent.md should summarize the project and stable preferences for implementation scope, experiment hygiene, reporting, and when to inspect past work or external references.
 - When the user's request is underspecified, ask at most 3 concise follow-up questions total.
 - When you still need follow-up answers, set needs_follow_up=true and fill follow_up_questions. Leave the three file fields null.
 - When you have enough information, set needs_follow_up=false, follow_up_questions=[] and return concise, editable markdown for all three files.
+- Unless you are explicitly reporting an automatic repair, leave `repair_note` null.
 """
+_GOAL_REPAIR_SYSTEM_PROMPT = """You are Helix setup repair, a focused repair assistant for `goal.md`.
+
+Your job is to repair only `goal.md` so that:
+- it preserves the intended project meaning
+- `## Success Criteria` uses the exact Helix machine-checkable schema
+- the result passes Helix's strict parser
+
+Rules:
+- Keep the same required section order: # Goal, ## Success Criteria, ## Boundary, ## Evaluation, ## Limitation.
+- Under `## Success Criteria`, use a fenced YAML block with exactly one of `all` or `any`.
+- Each criterion item must use exactly: `metric`, `op`, `value`.
+- Use only `<`, `<=`, `>`, `>=`, `==`, `!=`.
+- Do not use custom YAML keys such as `primary_metric`, `secondary_metric`, `backtest_constraints`, `reporting_metrics_required`, or `operational_limits`.
+- Move richer constraints and reporting rules into `## Boundary`, `## Evaluation`, or `## Limitation`.
+- Return only the full repaired `goal.md` markdown, nothing else.
+"""
+
+
+@dataclass(frozen=True)
+class RequirementInput:
+    """Initial requirement input collected for conversational setup."""
+
+    source_kind: RequirementSource
+    source_path: Path | None
+    requirement_text: str
 
 
 class SetupError(RuntimeError):
@@ -127,8 +171,8 @@ class OpenAISetupClient:
         self.model = model
         self.http_client = http_client or httpx.Client(timeout=120.0)
 
-    def generate(self, paragraph: str, follow_ups: list[tuple[str, str]]) -> SetupDraft:
-        transcript = [f"Initial paragraph:\n{paragraph.strip()}"]
+    def generate(self, requirement_text: str, follow_ups: list[tuple[str, str]]) -> SetupDraft:
+        transcript = [f"Initial requirement input:\n{requirement_text.strip()}"]
         if follow_ups:
             transcript.append("Follow-up answers:")
             for question, answer in follow_ups:
@@ -178,6 +222,50 @@ class OpenAISetupClient:
             return SetupDraft.model_validate(parsed)
         except Exception as exc:
             raise SetupError(f"Setup LLM returned an invalid draft: {exc}") from exc
+
+    def repair_goal_md(
+        self,
+        *,
+        requirement_text: str,
+        invalid_goal_md: str,
+        parser_error: str,
+    ) -> str:
+        """Repair a generated goal.md using the exact parser failure."""
+        payload = {
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": _GOAL_REPAIR_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "Repair this generated goal.md so that Helix accepts it.\n\n"
+                        "## Original Requirement Input\n"
+                        f"{requirement_text.strip()}\n\n"
+                        "## Parser Error\n"
+                        f"{parser_error.strip()}\n\n"
+                        "## Invalid goal.md\n"
+                        f"{invalid_goal_md.strip()}\n"
+                    ),
+                },
+            ],
+            "store": False,
+            "text": {"format": {"type": "text"}},
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            response = self.http_client.post(_RESPONSES_URL, headers=headers, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise SetupError(f"Setup goal repair call failed: {exc}") from exc
+
+        repaired = _extract_response_text(response.json()).strip()
+        if not repaired:
+            raise SetupError("Setup goal repair returned empty content.")
+        return repaired
 
 
 def audit_workspace(workspace: Path) -> WorkspaceAudit:
@@ -314,8 +402,17 @@ def _run_conversational_setup(
     files_to_write: dict[str, str] = {}
     if needs_llm:
         client = setup_client or OpenAISetupClient(api_key=api_key, model=model_name)
-        paragraph = ui.prompt_paragraph()
-        draft, follow_up_answers = _run_setup_conversation(client, paragraph, ui)
+        requirement_input = _collect_requirement_input(workspace, ui)
+        draft, follow_up_answers = _run_setup_conversation(
+            client,
+            requirement_input.requirement_text,
+            ui,
+        )
+        draft = _validate_or_repair_goal_md(
+            draft=draft,
+            client=client,
+            requirement_input=requirement_input,
+        )
 
         if "goal.md" in files_to_generate:
             files_to_write["goal.md"] = draft.goal_md or ""
@@ -324,7 +421,7 @@ def _run_conversational_setup(
         if "researcher_agent.md" in files_to_generate:
             files_to_write["researcher_agent.md"] = draft.researcher_agent_md or ""
         files_to_write["setup_transcript.md"] = build_setup_transcript(
-            paragraph=paragraph,
+            requirement_input=requirement_input,
             follow_up_answers=follow_up_answers,
             draft=draft,
             model=model_name,
@@ -363,13 +460,13 @@ def _run_conversational_setup(
 
 def _run_setup_conversation(
     client: OpenAISetupClient,
-    paragraph: str,
+    requirement_text: str,
     ui: SetupUI,
 ) -> tuple[SetupDraft, list[tuple[str, str]]]:
     follow_up_answers: list[tuple[str, str]] = []
 
     while True:
-        draft = client.generate(paragraph, follow_up_answers)
+        draft = client.generate(requirement_text, follow_up_answers)
         if not draft.needs_follow_up:
             return draft, follow_up_answers
 
@@ -386,22 +483,30 @@ def _run_setup_conversation(
 
 def build_setup_transcript(
     *,
-    paragraph: str,
+    requirement_input: RequirementInput,
     follow_up_answers: list[tuple[str, str]],
     draft: SetupDraft,
     model: str,
 ) -> str:
+    source_label = "paragraph" if requirement_input.source_kind == "paragraph" else "markdown file"
     lines = [
         "# Setup Transcript",
         "",
         f"- Model: {model}",
         f"- Summary: {draft.summary}",
-        "",
-        "## Initial Paragraph",
-        "",
-        paragraph.strip(),
-        "",
+        f"- Requirement source: {source_label}",
     ]
+    if draft.repair_note:
+        lines.append(f"- Repair note: {draft.repair_note}")
+    if requirement_input.source_path is not None:
+        lines.append(f"- Requirement source path: {requirement_input.source_path}")
+    lines.extend([
+        "",
+        "## Initial Requirement Input",
+        "",
+        requirement_input.requirement_text.strip(),
+        "",
+    ])
 
     if follow_up_answers:
         lines.extend(["## Follow-up Questions", ""])
@@ -411,6 +516,82 @@ def build_setup_transcript(
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _collect_requirement_input(workspace: Path, ui: SetupUI) -> RequirementInput:
+    """Collect the initial requirement text for conversational setup."""
+    source_kind = ui.choose_requirement_source()
+    if source_kind == "paragraph":
+        requirement_text = ui.prompt_paragraph().strip()
+        if not requirement_text:
+            raise SetupError("Requirement paragraph must not be empty.")
+        return RequirementInput(
+            source_kind="paragraph",
+            source_path=None,
+            requirement_text=requirement_text,
+        )
+
+    entered_path = ui.prompt_markdown_path().strip()
+    if not entered_path:
+        raise SetupError("Markdown file path must not be empty.")
+
+    source_path = Path(entered_path).expanduser()
+    if not source_path.is_absolute():
+        source_path = workspace / source_path
+
+    resolved_path = source_path.resolve()
+    if not resolved_path.exists():
+        raise SetupError(f"Markdown requirement file not found: {resolved_path}")
+    if not resolved_path.is_file():
+        raise SetupError(f"Markdown requirement path must be a file: {resolved_path}")
+    if resolved_path.suffix.lower() != ".md":
+        raise SetupError(f"Requirement file must have a .md extension: {resolved_path}")
+    try:
+        requirement_text = resolved_path.read_text()
+    except OSError as exc:
+        raise SetupError(f"Could not read Markdown requirement file {resolved_path}: {exc}") from exc
+    if not requirement_text.strip():
+        raise SetupError(f"Markdown requirement file is empty: {resolved_path}")
+
+    return RequirementInput(
+        source_kind="markdown_file",
+        source_path=resolved_path,
+        requirement_text=requirement_text.strip(),
+    )
+
+
+def _validate_or_repair_goal_md(
+    *,
+    draft: SetupDraft,
+    client: OpenAISetupClient,
+    requirement_input: RequirementInput,
+) -> SetupDraft:
+    """Ensure the generated goal.md has valid machine-checkable success criteria."""
+    goal_md = draft.goal_md or ""
+    try:
+        parse_success_criteria(goal_md)
+        return draft
+    except SuccessCriteriaError as exc:
+        parser_error = str(exc)
+
+    repaired_goal_md = client.repair_goal_md(
+        requirement_text=requirement_input.requirement_text,
+        invalid_goal_md=goal_md,
+        parser_error=parser_error,
+    )
+    try:
+        parse_success_criteria(repaired_goal_md)
+    except SuccessCriteriaError as exc:
+        raise SetupError(
+            f"Generated goal.md remained invalid after one automatic repair attempt: {exc}"
+        ) from exc
+
+    return draft.model_copy(
+        update={
+            "goal_md": repaired_goal_md,
+            "repair_note": f"goal.md required one automatic repair pass: {parser_error}",
+        }
+    )
 
 
 def build_scaffold_content(file_name: str) -> str:
